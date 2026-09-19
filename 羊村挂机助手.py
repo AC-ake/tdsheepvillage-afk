@@ -1,4 +1,4 @@
-"""羊村挂机助手1.2。
+"""羊村挂机助手1.2.1。
 
 作者：鹏小白就是我
 整合：A_c
@@ -52,12 +52,12 @@ DEFAULTS = {
     "wolf_click_max": 3, "wolf_click_gap_min": 1.0, "wolf_click_gap_max": 2.0,
     "wolf_after_friend": 1.0, "wolf_after_confirm": 1.0, "wolf_after_arrow": 1.0,
     "wolf_spy_threshold": 0.90,
-    "wolf_after_jiasu": 1.0, "wolf_jiasu_threshold": 0.90,
+    "wolf_after_jiasu": 1.0, "wolf_jiasu_threshold": 0.90, "wolf_jiasu_confirm_times": 2,
     "restart_time": "00:01", "restart_threshold": 0.90,
     "restart_fanpai_clicks": 3, "restart_fanpai_gap": 1.0,
     "restart_after_bwyc_seconds": 10.0, "restart_before_fanpai_seconds": 5.0,
     "restart_jinru_gap": 1.0, "restart_qianxian_gap": 2.0,
-    "restart_step_timeout": 10.0, "restart_total_seconds": 60.0,
+    "restart_step_timeout": 10.0, "restart_total_seconds": 61.0,
     "restart_resume_seconds": 10.0,
 }
 
@@ -68,6 +68,9 @@ FIRST_STRIKE_TIMEOUT = 30.0
 RESTART_IMAGES = (
     "bwyc.png", "choujiang.png", "jiangpin.png", "fanpai.png", "jinru.png", "qianxian.png",
 )
+
+# 单次重开的总时长下限：正常流程走完还要等抽奖、翻牌动画，短于这个值容易在同一分钟内被再次触发。
+RESTART_MIN_TOTAL_SECONDS = 61.0
 
 def extract_embedded_templates() -> list[str]:
     """读取 PyInstaller CArchive；仅把 PNG 模板复制到本工具自己的 templates 文件夹。"""
@@ -107,7 +110,7 @@ def extract_embedded_templates() -> list[str]:
 class AssistantApp:
     def __init__(self, root: tk.Tk) -> None:
         self.root = root
-        self.root.title("羊村挂机助手1.2")
+        self.root.title("羊村挂机助手1.2.1")
         self.root.geometry("380x760")
         self.root.protocol("WM_DELETE_WINDOW", self.close)
         self.click_lock = threading.Lock()
@@ -115,6 +118,7 @@ class AssistantApp:
         self.sequence_lock = threading.Lock()
         self.first_strike = threading.Event()
         self.restart_thread_id: int | None = None
+        self.restart_fired_slot = ""   # 记录已经触发过的那一分钟，避免同一分钟内重复重开
         # 运行日志：按启动时间生成 logs 里的 txt 文件名，默认关闭记录，F12 或按钮随时开关。
         self.log_file = None
         self.log_path: Path | None = None
@@ -153,7 +157,7 @@ class AssistantApp:
         # 版本信息放在窗口最上方，独占一行，不和任何功能按钮重叠。
         header = ttk.Frame(self.root)
         header.pack(fill="x", padx=10, pady=(8, 0))
-        ttk.Label(header, text="羊村挂机助手1.2", font=tkfont.Font(size=13, weight="bold")).pack(anchor="w")
+        ttk.Label(header, text="羊村挂机助手1.2.1", font=tkfont.Font(size=13, weight="bold")).pack(anchor="w")
         ttk.Label(header, text="作者：鹏小白就是我　整合：A_c　操刀师傅：Ai-codex",
                   foreground="#555").pack(anchor="w")
         book = ttk.Notebook(self.root)
@@ -263,7 +267,7 @@ class AssistantApp:
                 ("每位好友最少点击次数", "wolf_click_min"), ("每位好友最多点击次数", "wolf_click_max"),
                 ("单次点击最短间隔（秒）", "wolf_click_gap_min"), ("单次点击最长间隔（秒）", "wolf_click_gap_max"),
                 ("点好友后等待（秒）", "wolf_after_friend"), ("点加速后等待（秒）", "wolf_after_jiasu"),
-                ("点确定后等待（秒）", "wolf_after_confirm"),
+                ("加速后确定次数上限", "wolf_jiasu_confirm_times"), ("点确定后等待（秒）", "wolf_after_confirm"),
                 ("点右箭头后等待（秒）", "wolf_after_arrow")]
         for row, (label, key) in enumerate(rows): self.add_setting(setting, label, key, row)
         self.add_setting(setting, "加速按钮识图阈值", "wolf_jiasu_threshold", len(rows), "识别 jiasu.png，默认 0.90")
@@ -290,7 +294,7 @@ class AssistantApp:
                 ("点 jinru.png 前等待（秒）", "restart_jinru_gap", "默认 1"),
                 ("点 qianxian.png 前等待（秒）", "restart_qianxian_gap", "默认 2"),
                 ("单步识图最长等待（秒）", "restart_step_timeout", "超时判定卡住，默认 10"),
-                ("单次重开总时长（秒）", "restart_total_seconds", "默认 60"),
+                ("单次重开总时长（秒）", "restart_total_seconds", "默认 61，最小 61"),
                 ("点 qianxian.png 后恢复等待（秒）", "restart_resume_seconds", "默认 10")]
         for row, (label, key, hint) in enumerate(rows): self.add_setting(setting, label, key, row, hint)
         ttk.Label(frame, text="所需图片：bwyc.png、choujiang.png、jiangpin.png、fanpai.png、jinru.png、qianxian.png\n"
@@ -549,7 +553,6 @@ class AssistantApp:
         """每天到设定时间执行一次定时重开游戏。"""
         my_id = threading.get_ident()
         self.restart_thread_id = my_id   # 新线程接管后，旧的定时重开线程会自己退出
-        fired_date = ""
         self.log("定时重开已启动，到点后会自动重开游戏。")
         while self.restart_event.is_set() and not self.stop_event.is_set():
             if self.restart_thread_id != my_id: return
@@ -563,9 +566,11 @@ class AssistantApp:
                 self.root.after(0, lambda: self.restart_enabled.set(False))
                 return
             now = time.localtime()
-            today = time.strftime("%Y-%m-%d", now)
-            if time.strftime("%H:%M", now) == target and today != fired_date:
-                fired_date = today
+            # 同一分钟只触发一次：重开流程结束后会重启本线程，标记必须放在实例变量上，
+            # 否则 00:01 触发的流程跑到 00:01 末尾结束后，会被再次判定成到点又重开一次。
+            slot = "%s %s" % (time.strftime("%Y-%m-%d", now), target)
+            if time.strftime("%H:%M", now) == target and slot != self.restart_fired_slot:
+                self.restart_fired_slot = slot
                 self.log(f"系统时间到达 {target}，开始定时重开游戏。")
                 self.restart_sequence()
             if not self.wait(1.0, self.restart_event): break
@@ -583,6 +588,9 @@ class AssistantApp:
             qianxian_gap = float(self.number("restart_qianxian_gap"))
             step_timeout = float(self.number("restart_step_timeout"))
             total_seconds = float(self.number("restart_total_seconds"))
+            if total_seconds < RESTART_MIN_TOTAL_SECONDS:
+                self.log(f"单次重开总时长最小 {RESTART_MIN_TOTAL_SECONDS:g} 秒，已按最小值执行。")
+                total_seconds = RESTART_MIN_TOTAL_SECONDS
             resume_seconds = float(self.number("restart_resume_seconds"))
         except ValueError as error:
             self.log(f"定时重开参数错误：{error}"); return
@@ -676,6 +684,7 @@ class AssistantApp:
             if g2 < g1: raise ValueError("点击间隔范围不正确")
             threshold = float(self.number("wolf_spy_threshold"))
             jiasu_threshold = float(self.number("wolf_jiasu_threshold"))
+            jiasu_confirms = int(self.number("wolf_jiasu_confirm_times", True))
             friend, arrow = (self.data[k] for k in ("wolf_friend", "wolf_arrow"))
             while self.wolf_event.is_set() and not self.stop_event.is_set():
                 self.click_xy(*friend)
@@ -683,7 +692,14 @@ class AssistantApp:
                 # 进入好友界面后先加速好友矿产：识别到 jiasu.png 才点，等待后再点确定。
                 if self.click_image("jiasu.png", jiasu_threshold):
                     if not self.wait(float(self.number("wolf_after_jiasu")), self.wolf_event): break
-                    if not self.click_image("queding.png", threshold): self.log("未识别到 queding.png。")
+                    # 加速到第 5 次会连续弹「加速奖励」和「加速已到上限」两个确定框，
+                    # 只点一次会剩一个框卡住流程，所以这里按设定的次数上限连点确定。
+                    for count in range(max(jiasu_confirms, 0)):
+                        if not self.click_image("queding.png", threshold):
+                            if count == 0: self.log("未识别到 queding.png。")
+                            break
+                        if not self.wait(float(self.number("wolf_after_jiasu")), self.wolf_event): break
+                    if not self.wait(float(self.number("wolf_after_confirm")), self.wolf_event): break
                 else:
                     self.log("未识别到 jiasu.png，跳过加速好友矿产。")
                 # 间谍狼图片是动态点击区域：找到才敲；没找到就跳过确定，直接翻下一位好友。
@@ -699,6 +715,8 @@ class AssistantApp:
                         if not self.wait(random.uniform(g1, g2), self.wolf_event): break
                     if not self.wait_for_image_and_click("queding.png", threshold, self.wolf_event):
                         break
+                    # 点完确定要等好友界面退回去，再翻下一位好友（这个等待之前没生效）。
+                    if not self.wait(float(self.number("wolf_after_confirm")), self.wolf_event): break
                 else:
                     self.log("未识别到间谍狼，跳过敲狼并切换下一位好友。")
                 self.click_xy(*arrow)

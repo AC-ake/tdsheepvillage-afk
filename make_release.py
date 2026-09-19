@@ -10,11 +10,11 @@ import sys
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent
-APP_NAME = "tdsheepvillage-afk1.2"
+APP_NAME = "tdsheepvillage-afk1.2.1"
 DIST = ROOT / "dist"
 RELEASE_DIR = DIST / "release" / APP_NAME
 FOLDERS = ("templates", "图像")
-DOCS = ("README.md", "更新日志.md", "发行说明-1.2.md")
+DOCS = ("README.md", "更新日志.md", "发行说明-1.2.1.md")
 
 
 def build() -> None:
